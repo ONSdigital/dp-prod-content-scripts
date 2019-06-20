@@ -11,12 +11,14 @@ import (
 )
 
 type Counter struct {
-	targetTypes map[string]int
-	total       int
+	any       bool
+	typeCount map[string]int
+	total     int
 }
 
 func main() {
 	dir := flag.String("dir", "", "the zebedee master dir")
+	anyType := flag.Bool("any", false, "")
 	targetTypes := flag.String("types", "", "comma separated list of page types to count")
 	flag.Parse()
 
@@ -24,21 +26,27 @@ func main() {
 		errExit(errors.New("master dir does not exist"))
 	}
 
-	if *targetTypes == "" {
+	c := &Counter{total: 0, any: *anyType, typeCount: make(map[string]int)}
+
+	if c.any {
+		log.Event(nil, "running count job for any page type", log.Data{
+			"any": c.any,
+			"dir": *dir,
+		})
+
+	} else {
+		types := strings.Split(*targetTypes, ",")
+		for _, val := range types {
+			c.typeCount[strings.TrimSpace(val)] = 0
+		}
+		log.Event(nil, "running count job for pageTypes", log.Data{"types": targetTypes, "dir": *dir})
+	}
+
+	if !*anyType && *targetTypes == "" {
 		errExit(errors.New("page type not specified"))
 	}
 
-	types := strings.Split(*targetTypes, ",")
-	typeMap := map[string]int{}
-	for _, val := range types {
-		typeMap[strings.TrimSpace(val)] = 0
-	}
-
-	log.Event(nil, "running count job for pageTypes", log.Data{
-		"types": targetTypes,
-		"dir":   *dir,
-	})
-	if err := content.FilterAndProcess(*dir, &Counter{total: 0, targetTypes: typeMap}); err != nil {
+	if err := content.FilterAndProcess(*dir, c); err != nil {
 		errExit(err)
 	}
 }
@@ -71,7 +79,11 @@ func (c *Counter) Filter(path string, info os.FileInfo) (bool, error) {
 		return false, err
 	}
 
-	if _, ok := c.targetTypes[pageType.Value]; ok {
+	if c.any {
+		return strings.Contains(string(jBytes), "@ons.gsi.gov.uk"), nil
+	}
+
+	if _, ok := c.typeCount[pageType.Value]; ok {
 		return strings.Contains(string(jBytes), "@ons.gsi.gov.uk"), nil
 	}
 
@@ -89,10 +101,10 @@ func (c *Counter) Process(path string) error {
 		return err
 	}
 
-	if count, ok := c.targetTypes[pageType.Value]; ok {
-		c.targetTypes[pageType.Value] = count + 1
+	if count, ok := c.typeCount[pageType.Value]; ok {
+		c.typeCount[pageType.Value] = count + 1
 	} else {
-		c.targetTypes[pageType.Value] = 0
+		c.typeCount[pageType.Value] = 0
 	}
 
 	c.total += 1
@@ -101,7 +113,7 @@ func (c *Counter) Process(path string) error {
 
 func (c *Counter) OnComplete() error {
 	log.Event(nil, "count page types contain gsi emails complete", log.Data{
-		"page_types": c.targetTypes,
+		"page_types": c.typeCount,
 		"total":      c.total,
 	})
 	return nil
