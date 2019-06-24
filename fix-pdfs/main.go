@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"errors"
 	"flag"
 	"os"
@@ -32,34 +33,40 @@ func main() {
 	}
 
 	fixC := collections.New(collectionsDir, collectionName)
-	if err := collections.Save(fixC); err != nil {
-		errExit(err)
-	}
+	fixC.ApprovalStatus = collections.CompleteState
+	err := collections.Save(fixC)
+	checkError(err)
 
 	allCols, err := collections.GetCollections(collectionsDir)
-	if err != nil {
-		errExit(err)
-	}
+	checkError(err)
 
-	types, err := parsePageTypes(pageTypes)
-	if err != nil {
-		errExit(err)
-	}
+	types := parsePageTypes(pageTypes)
+	checkError(err)
+
+	outputPath := filepath.Join(baseDir, "gsi-fixes.csv")
+
+	f, err := os.Create(outputPath)
+	checkError(err)
+	defer f.Close()
+
+	csvW := csv.NewWriter(f)
+	err = csvW.Write([]string{"uri", "page type", "generates PDF"})
+	checkError(err)
 
 	job := &fix{
-		Limit:     limit,
-		FixCount:  0,
-		FixLog:    make(map[string]int, 0),
-		MasterDir: masterDir,
-		AllCols:   allCols,
-		FixC:      fixC,
-		Blocked:   make([]string, 0),
-		PageTypes: types,
+		OutputPath: outputPath,
+		Limit:      limit,
+		FixCount:   0,
+		MasterDir:  masterDir,
+		AllCols:    allCols,
+		FixC:       fixC,
+		Blocked:    make([]string, 0),
+		PageTypes:  types,
+		CSVW:       csvW,
 	}
 
-	if err = content.FilterAndProcess(masterDir, job); err != nil {
-		errExit(err)
-	}
+	err = content.FilterAndProcess(masterDir, job)
+	checkError(err)
 }
 
 func getFlags() (string, string, string, int) {
@@ -72,22 +79,27 @@ func getFlags() (string, string, string, int) {
 	return *baseDir, *collectionName, *pageTypes, *limit
 }
 
-func parsePageTypes(s string) (map[string]bool, error) {
+func parsePageTypes(s string) map[string]bool {
+	results := make(map[string]bool, 0)
 	if s == "" {
-		return nil, errors.New("no page types provided")
+		return results
 	}
 
 	typesRaw := strings.Split(s, ",")
-	results := make(map[string]bool, 0)
-
 	for _, v := range typesRaw {
 		results[strings.TrimSpace(v)] = true
 	}
 
-	return results, nil
+	return results
 }
 
 func errExit(err error) {
 	log.Event(nil, "Filter and process script returned an error", log.Error(err))
 	os.Exit(1)
+}
+
+func checkError(err error) {
+	if err != nil {
+		errExit(err)
+	}
 }

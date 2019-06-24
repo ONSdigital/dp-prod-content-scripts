@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ONSdigital/dp-zebedee-utils/collections"
@@ -12,15 +14,16 @@ import (
 )
 
 type fix struct {
+	OutputPath  string
 	MasterDir   string
 	AllCols     *collections.Collections
 	FixC        *collections.Collection
 	Limit       int
-	FixCount    int
-	FixLog      map[string]int
 	Blocked     []string
 	PageTypes   map[string]bool
 	AnyPageType bool
+	FixCount    int
+	CSVW        *csv.Writer
 }
 
 func (f *fix) Filter(path string, info os.FileInfo) (bool, error) {
@@ -41,6 +44,16 @@ func (f *fix) Filter(path string, info os.FileInfo) (bool, error) {
 		return false, err
 	}
 
+	if !strings.Contains(string(jBytes), oldEmail) {
+		return false, nil
+	}
+
+	// if empty then consider all page types.
+	if len(f.PageTypes) == 0 {
+		return true, nil
+	}
+
+	// else check the type
 	pageType, err := content.GetPageType(jBytes)
 	if err != nil {
 		return false, err
@@ -66,10 +79,6 @@ func (f *fix) Process(path string) error {
 		return err
 	}
 
-	if !strings.Contains(jsonStr, oldEmail) {
-		return nil
-	}
-
 	uri = "/" + uri
 	if blocked, name := f.AllCols.IsBlocked(uri); blocked {
 		f.Blocked = append(f.Blocked, fmt.Sprintf("%s:%s", name, uri))
@@ -78,39 +87,70 @@ func (f *fix) Process(path string) error {
 
 	jsonStr = strings.Replace(jsonStr, oldEmail, newEmail, -1)
 
-	//log.Event(nil, "applying content fix", log.Data{"uri": uri})
 	if err := f.FixC.AddToReviewed(uri, []byte(jsonStr)); err != nil {
 		return err
 	}
-
-
 
 	pageType, err := content.GetPageType([]byte(jsonStr))
 	if err != nil {
 		return err
 	}
 
-	f.logFix(pageType)
-	f.FixCount += 1
+	if err := f.logFix(uri, pageType); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (f *fix) OnComplete() error {
+	f.CSVW.Flush()
+
+	total, stats, err := f.getResults()
+	if err != nil {
+		return err
+	}
+
 	logD := log.Data{
-		"stats":          f.FixLog,
-		"fix_count":      f.FixCount,
+		"stats":          stats,
+		"fix_count":      total,
 		"fix_collection": f.FixC.Name,
 		"blocked":        f.Blocked,
 	}
 
-	if len(f.Blocked) <= 20 {
-		logD["blocked"] = f.Blocked
-	} else {
-		logD["blocked"] = len(f.Blocked)
-	}
+	logD["blocked"] = len(f.Blocked)
 
 	log.Event(nil, "script fixing content completed successfully", logD)
 	return nil
+}
+
+func (f *fix) getResults() (int, map[string]int, error) {
+	file, err := os.Open(f.OutputPath)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer file.Close()
+
+	csvR := csv.NewReader(file)
+	rec, err := csvR.ReadAll()
+	if err != nil {
+		return 0, nil, err
+	}
+
+	stats := make(map[string]int, 0)
+	for i, row := range rec {
+		if i == 0 {
+			continue
+		}
+
+		if count, ok := stats[row[1]]; ok {
+			stats[row[1]] = count + 1
+		} else {
+			stats[row[1]] = 1
+		}
+	}
+
+	return len(rec) - 1, stats, nil
 }
 
 func (f *fix) LimitReached() bool {
@@ -120,10 +160,20 @@ func (f *fix) LimitReached() bool {
 	return f.FixCount >= f.Limit
 }
 
-func (f *fix) logFix(pageType *content.PageType) {
-	if count, ok := f.FixLog[pageType.Value]; ok {
-		f.FixLog[pageType.Value] = count + 1
-	} else {
-		f.FixLog[pageType.Value] = 1
+func (f *fix) logFix(uri string, pageType *content.PageType) error {
+	f.FixCount += 1
+	err := f.CSVW.Write(toCSVRow(uri, pageType))
+	return err
+}
+
+func toCSVRow(uri string, pageType *content.PageType) []string {
+	return []string{uri, pageType.Value, strconv.FormatBool(isPDF(pageType))}
+}
+
+func isPDF(pageType *content.PageType) bool {
+	switch pageType.Value {
+	case "article", "bulletin", "compendium_landing_page", "compendium_chapter", "static_methodology":
+		return true
 	}
+	return false
 }
